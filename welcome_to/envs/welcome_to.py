@@ -223,8 +223,7 @@ class Row:
             case ActionCard.TEMP:
                 new_house_nums = np.eye(MAX_TEMP_NUMBER, dtype=bool)[
                     house_number]
-                new_house_nums[(max(house_number - 2, 0))
-                                :(min(house_number + 3, MAX_HOUSE_NUMBER))] = True
+                new_house_nums[(max(house_number - 2, 0))                               :(min(house_number + 3, MAX_HOUSE_NUMBER))] = True
                 action_mask = np.logical_and(self.valid_ranges, new_house_nums)
             case ActionCard.POOL:
                 action_mask = house_actions[self.POOL_IDX, :] if self.global_scores.get_pool_mask(
@@ -314,8 +313,16 @@ class Deck:
         mapping[ActionCard.FENCE] = [0, 1, 2, 4, 4, 5,
                                      5, 6, 7, 7, 8, 9, 9, 10, 10, 12, 13, 14]
 
+        # creates an (81,2) array, where each element [n,m] represents a card of action
+        # type n and house number DECK_MAP[n][m]
         deck = np.concatenate([np.mgrid[i:i+1, :len(x)].T.reshape(-1, 2)
                                for i, x in enumerate(mapping)])
+
+        max_len = max([len(x) for x in mapping])
+
+        # creates a (6,18) array that maps linear card numbers to specific house
+        # numbers for each action type
+        mapping = np.stack([np.pad(x, (0, max_len - len(x))) for x in mapping])
         return deck, mapping
 
     NEW_DECK, DECK_MAP = create_deck_mapping()
@@ -336,10 +343,13 @@ class Deck:
         self.deck_pointer = 3
 
     def get_observation(self):
+        action_cards = self.deck[(self.deck_pointer - 3):self.deck_pointer]
+        number_cards = self.deck[self.deck_pointer: (self.deck_pointer+3)]
+        number_card_actions = number_cards[:, 0]
         return {
-            "visible_actions": self.deck[(self.deck_pointer - 3):self.deck_pointer][:, 0],
-            "visible_numbers": self.deck[self.deck_pointer:(self.deck_pointer + 3)][:, 1],
-            "visible_next_actions": self.deck[self.deck_pointer:(self.deck_pointer + 3)][:, 0],
+            "visible_actions": action_cards[:, 0],
+            "visible_numbers": Deck.DECK_MAP[number_card_actions][number_cards[:, 1]],
+            "visible_next_actions": number_card_actions,
             "remaining_triplets": ((Deck.NUM_CARDS - self.deck_pointer - 3) / 3)
         }
 
