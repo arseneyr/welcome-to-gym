@@ -102,6 +102,9 @@ class GlobalScores:
     def get_failure_to_play_score(self) -> int:
         return GlobalScores.FAILURE_TO_PLAY_SCORES[self.failure_to_play]
 
+    def get_global_score(self) -> int:
+        return self.get_pool_score() + self.get_bis_score() + self.get_failure_to_play_score
+
 
 class Row:
     HOUSE_NUMBER_DIAG = np.pad(
@@ -204,14 +207,14 @@ class Row:
             "parks": self.parks
         }
 
-    def get_action_mask(self, house_number: int, action_card: ActionCard) -> Optional[np.ndarray[bool]]:
+    def get_action_mask(self, action_card: ActionCard, house_number: int) -> np.ndarray[bool]:
         new_house_num = np.eye(MAX_HOUSE_NUMBER, dtype=bool)[house_number]
         house_actions = np.logical_and(
             self.valid_ranges[:, :MAX_HOUSE_NUMBER], new_house_num[np.newaxis, ...])
-        if not house_actions.any():
-            return None
 
         ret = np.zeros(self.NUM_ACTIONS, dtype=bool)
+        if not house_actions.any():
+            return ret
 
         match action_card:
             case ActionCard.BIS:
@@ -292,6 +295,9 @@ class Row:
     def get_park_score(self):
         return self.PARK_SCORES[self.parks]
 
+    def get_score(self) -> int:
+        return (self.get_estates() * self.global_scores.estate_scores()).sum() + self.PARK_SCORES[self.parks]
+
     def get_estates(self) -> np.ndarray[int]:
         estates = np.split(self.houses > 0, self.fences.nonzero()[0] + 1)
         ret = np.zeros(GlobalScores.NUM_ESTATE_TYPES, dtype=np.uint8)
@@ -300,6 +306,9 @@ class Row:
                 continue
             ret[len(e) - 1] += 1
         return ret
+
+    def is_full(self) -> bool:
+        return np.all(self.houses > 0)
 
 
 class Deck:
@@ -332,14 +341,15 @@ class Deck:
         "visible_actions": spaces.MultiDiscrete([len(ActionCard) - 1] * 3),
         "visible_numbers": spaces.MultiDiscrete([MAX_HOUSE_NUMBER] * 3),
         "visible_next_actions": spaces.MultiDiscrete([len(ActionCard) - 1] * 3),
-        "remaining_triplets": spaces.Discrete((NUM_CARDS / 3) - 2)
+        "remaining_triplets": spaces.Discrete((NUM_CARDS // 3) - 2)
     }
 
-    def __init__(self):
+    def __init__(self, rng: np.random.Generator):
         self.deck = Deck.NEW_DECK.copy()
+        self.rng = rng
 
-    def reset(self, rng: np.random.Generator):
-        rng.shuffle(self.deck)
+    def reset(self):
+        self.rng.shuffle(self.deck)
         self.deck_pointer = 3
 
     def get_observation(self):
@@ -348,13 +358,18 @@ class Deck:
         number_card_actions = number_cards[:, 0]
         return {
             "visible_actions": action_cards[:, 0],
-            "visible_numbers": Deck.DECK_MAP[number_card_actions][number_cards[:, 1]],
+            "visible_numbers": Deck.DECK_MAP[number_card_actions][[0, 1, 2], number_cards[:, 1]],
             "visible_next_actions": number_card_actions,
             "remaining_triplets": ((Deck.NUM_CARDS - self.deck_pointer - 3) / 3)
         }
 
     def advance_cards(self):
-        self.deck_pointer += 3
+        if self.deck_pointer == (Deck.NUM_CARDS - 3):
+            self.deck = np.concatenate((self.deck[-3:], self.deck[:-3]))
+            self.rng.shuffle(self.deck[3:])
+            self.deck_pointer = 3
+        else:
+            self.deck_pointer += 3
 
 
 class WelcomeToEnv(Env):
@@ -367,37 +382,68 @@ class WelcomeToEnv(Env):
                          0, 3, 7], park_scores=PARK_SCORES[1], global_scores=self.global_scores),
                      Row(size=12, pools=[1, 6, 10], park_scores=PARK_SCORES[2], global_scores=self.global_scores))
 
+        self.deck = Deck(self.np_random)
+
         self.observation_space = spaces.Dict({
             "rows": spaces.Tuple([r.observation_space for r in self.rows]),
-        } | self.global_scores.observation_space)
+        } | self.global_scores.observation_space | self.deck.observation_space)
 
-    def reset(self, *, seed):
-        super.reset(seed=seed)
-        self.np_random
+        offset = 0
+        self.action_offsets = []
+        for r in self.rows:
+            self.action_offsets.append(offset)
+            offset += r.NUM_ACTIONS
+
+        # additional null action, when all the others are impossible
+        self.NUM_ACTIONS = offset + 1
+
+        self.action_space = spaces.Discrete(self.NUM_ACTIONS)
+
+    def reset(self, seed=None):
+        super().reset(seed=seed)
         self.global_scores.reset()
         for r in self.rows:
             r.reset()
+        self.deck.reset()
+        self.cumulative_score = 0
         return self.get_observation()
 
-    def get_observation(self):
+    def get_observation(self) -> dict:
         return {
             "rows": (r.get_observation() for r in self.rows),
-        } | self.global_scores.get_observation()
+        } | self.global_scores.get_observation() | self.deck.get_observation()
 
+    def get_score(self) -> int:
+        return sum((r.get_score() for r in self.rows)) + self.global_scores.get_global_score()
 
-def do_stuff():
-    global_scores = GlobalScores()
-    r = Row(size=10, pools=[2, 6, 7], num_parks=4,
-            global_scores=global_scores)
-    # r2 = Row(11, [2, 6, 7], 5, np.ones(6, dtype=bool))
-    # r3 = Row(12, [2, 6, 7], 6, np.ones(6, dtype=bool))
-    # sum = r.NUM_ACTIONS + r2.NUM_ACTIONS + r3.NUM_ACTIONS
-    global_scores.reset()
-    r.reset()
-    r.add_house(2, 4)
+    def step(self, action: int) -> Tuple[dict, float, bool, bool, dict]:
+        done = False
+        if action == self.NUM_ACTIONS - 1:
+            self.global_scores.advance_failure_to_play()
+            done = self.global_scores.is_max_failure_reached()
+        else:
+            for i, offset in reversed(list(enumerate(self.action_offsets))):
+                if action >= offset:
+                    self.rows[i].apply_action(action - offset)
+                    break
 
-    # r.get_action_mask(5, ActionCard.POOL)
-    return r.get_action_mask(5, ActionCard.BIS)
+        done = done or all([r.is_full() for r in self.rows])
+        reward = self.get_score() - self.cumulative_score
+        self.cumulative_score += reward
 
+        self.deck.advance_cards()
 
-do_stuff()
+        return self.get_observation(), reward, done, False
+
+    def action_masks(self) -> np.ndarray[bool]:
+        deck_observation = self.deck.get_observation()
+        visible_cards = np.column_stack(
+            (deck_observation["visible_actions"], deck_observation["visible_numbers"]))
+        ret = np.zeros(self.NUM_ACTIONS, dtype=bool)
+        offset = 0
+        for row in self.rows:
+            ret[offset:(offset+row.NUM_ACTIONS)] = np.logical_or.reduce([row.get_action_mask(
+                action, number) for action, number in visible_cards])
+            offset += row.NUM_ACTIONS
+        ret[-1] = not ret.any()
+        return ret
