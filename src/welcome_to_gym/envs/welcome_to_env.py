@@ -187,7 +187,7 @@ class Row:
                      np.eye(self.SIZE, self.SIZE-1, dtype=bool)]
         self.BIS_NEIGHBORS = np.stack(neighbors, axis=1)
         self.BIS_NEIGHBOR_MASK = np.invert(
-            np.stack(reversed(neighbors), axis=1))
+            np.stack(list(reversed(neighbors)), axis=1))
 
     def reset(self):
         self.houses = np.zeros(self.SIZE, dtype=np.uint8)
@@ -225,7 +225,7 @@ class Row:
             case ActionCard.TEMP:
                 new_house_nums = np.eye(MAX_TEMP_NUMBER, dtype=bool)[
                     house_number]
-                new_house_nums[(max(house_number - 2, 0))                               :(min(house_number + 3, MAX_HOUSE_NUMBER))] = True
+                new_house_nums[(max(house_number - 2, 0)):(min(house_number + 3, MAX_HOUSE_NUMBER))] = True
                 action_mask = np.logical_and(self.valid_ranges, new_house_nums)
             case ActionCard.POOL:
                 action_mask = house_actions[self.POOL_IDX, :] if self.global_scores.get_pool_mask(
@@ -486,17 +486,3 @@ def np_random(seed: Optional[int] = None) -> np.random.Generator:
     """
     seed_seq = np.random.SeedSequence(seed)
     return np.random.Generator(np.random.PCG64(seed_seq))
-
-
-gs = GlobalScores()
-gs.reset()
-r = Row(size=10, pools=[2, 6, 7],
-        park_scores=PARK_SCORES[0], global_scores=gs)
-r.reset()
-r.add_house(1, 1)
-r.add_house(2, 2)
-# r.fences[[1, 4]] = True
-r.get_action_mask(action_card=ActionCard.BIS, house_number=5)
-env = WelcomeToEnv()
-env.reset()
-env.action_masks()

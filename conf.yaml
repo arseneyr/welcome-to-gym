@@ -1,0 +1,4 @@
+WelcomeTo-v0:
+  policy: 'MlpPolicy'
+  n_envs: 8
+  n_timesteps: !!float 1e6
